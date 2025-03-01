@@ -1,100 +1,132 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.28;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/**
- * @title PiggyBank
- * @notice A contract that allows users to save funds for a fixed duration
- */
 contract PiggyBank is Ownable {
+    // Stablecoin addresses
+    address public constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address public constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
+
+    
     string public savingPurpose;
-    uint256 public savingDuration;
-    uint256 public creationTime;
-    address public developer;
+    uint256 public creationDate;
+    uint256 public maturityDate;
     bool public isActive;
+    
 
-    event Deposited(address indexed user, uint256 amount);
-    event Withdrawn(address indexed user, uint256 amount);
-    event PenaltyPaid(address indexed user, uint256 amount);
+    mapping(address => uint256) public tokenBalances;
+    
+    // Penalty percentage for early withdrawal (15%)
+    uint256 public constant PENALTY_PERCENTAGE = 15;
 
-    modifier onlyWhenActive() {
-        require(isActive, "PiggyBank is not active");
-        _;
+    
+    event Deposit(address indexed token, uint256 amount);
+    event Withdrawal(address indexed token, uint256 amount, uint256 penalty);
+
+    
+    constructor() Ownable(msg.sender) {
+        // Default initialization
+        isActive = false;
     }
-
-    constructor() Ownable(msg.sender) {} // Fix for Ownable constructor
-
-    /**
-     * @notice Initializes the PiggyBank (for use with Clones)
-     * @param _purpose The saving goal description
-     * @param _durationInDays Number of days before withdrawal is allowed
-     * @param _developer Address that receives penalties
-     * @param _owner The owner of this PiggyBank
-     */
+    
+    
     function initialize(
-        string memory _purpose,
-        uint256 _durationInDays,
-        address _developer,
-        address _owner
+        address owner,
+        string memory _savingPurpose,
+        uint256 durationDays
     ) external {
-        require(bytes(savingPurpose).length == 0, "Already initialized");
+        require(!isActive, "PiggyBank already initialized");
         
-        savingPurpose = _purpose;
-        savingDuration = _durationInDays * 1 days;
-        creationTime = block.timestamp;
-        developer = _developer;
+        // Transfer ownership to the actual user
+        _transferOwnership(owner);
+        
+        
+        savingPurpose = _savingPurpose;
+        creationDate = block.timestamp;
+        maturityDate = block.timestamp + (durationDays * 1 days);
         isActive = true;
-
-        _transferOwnership(_owner); // Assign correct owner
     }
-
-    /**
-     * @notice Deposits funds into the PiggyBank
-     */
-    function deposit() external payable onlyWhenActive {
-        require(msg.value > 0, "Deposit must be greater than zero");
-        emit Deposited(msg.sender, msg.value);
-    }
-
-    /**
-     * @notice Withdraws funds when the saving period is over
-     */
-    function withdraw() external onlyOwner onlyWhenActive {
-        require(block.timestamp >= creationTime + savingDuration, "Saving period not yet over");
+    
+    
+    function deposit(address token, uint256 amount) external onlyOwner {
+        require(isActive, "PiggyBank is no longer active");
+        require(
+            token == USDT || token == USDC || token == DAI,
+            "Token not allowed"
+        );
+        require(amount > 0, "Amount must be greater than 0");
         
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No funds to withdraw");
-
-        isActive = false;
-        payable(owner()).transfer(balance);
-        emit Withdrawn(owner(), balance);
+      
+        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        
+       
+        tokenBalances[token] += amount;
+        
+        emit Deposit(token, amount);
     }
-
-    /**
-     * @notice Allows early withdrawal with a penalty fee
-     */
-    function earlyWithdraw() external onlyOwner onlyWhenActive {
-        require(block.timestamp < creationTime + savingDuration, "Use normal withdraw");
-
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No funds to withdraw");
-
-        uint256 penalty = (balance * 10) / 100; // 10% penalty
-        uint256 remaining = balance - penalty;
-
-        isActive = false;
-        payable(developer).transfer(penalty);
-        payable(owner()).transfer(remaining);
-
-        emit PenaltyPaid(owner(), penalty);
-        emit Withdrawn(owner(), remaining);
+    
+   
+    function withdraw(address token, uint256 amount) external onlyOwner {
+        require(tokenBalances[token] >= amount, "Insufficient balance");
+        
+        uint256 penalty = 0;
+        
+        // Apply penalty if withdrawal is before maturity
+        if (!isSavingComplete()) {
+            penalty = (amount * PENALTY_PERCENTAGE) / 100;
+            
+            // Transfer penalty to the developer
+            if (penalty > 0) {
+                IERC20(token).transfer(owner(), penalty);
+            }
+        }
+        
+       
+        IERC20(token).transfer(owner(), amount - penalty);
+        
+       
+        tokenBalances[token] -= amount;
+        
+        
+        bool allBalancesZero = true;
+        
+        if (tokenBalances[USDT] > 0 || tokenBalances[USDC] > 0 || tokenBalances[DAI] > 0) {
+            allBalancesZero = false;
+        }
+        
+        if (allBalancesZero) {
+            isActive = false;
+        }
+        
+        emit Withdrawal(token, amount, penalty);
     }
-
-    /**
-     * @notice Check contract balance
-     */
-    function getBalance() external view returns (uint256) {
-        return address(this).balance;
+    
+    
+    function isSavingComplete() public view returns (bool) {
+        return block.timestamp >= maturityDate;
+    }
+    
+   
+    function timeUntilMaturity() public view returns (uint256) {
+        if (block.timestamp >= maturityDate) {
+            return 0;
+        }
+        return maturityDate - block.timestamp;
+    }
+    
+   
+    function getTotalSavings() external view returns (
+        uint256 usdtBalance,
+        uint256 usdcBalance,
+        uint256 daiBalance
+    ) {
+        return (
+            tokenBalances[USDT],
+            tokenBalances[USDC],
+            tokenBalances[DAI]
+        );
     }
 }
